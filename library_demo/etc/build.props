@@ -1,0 +1,8 @@
+title = PIDE MCP shared ML tool reuse demo
+module = $PIDE_MCP_LIBRARY_DEMO_JAR
+requirements = \
+  env:ISABELLE_SCALA_JAR \
+  env:ISABELLE_MCP_LIBRARY_JAR \
+  env:ISABELLE_PIDE_MCP_JAR
+sources = src/library_demo.scala
+services = isabelle.pide.mcp.demo.Library_Demo_Session

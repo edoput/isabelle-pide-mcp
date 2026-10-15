@@ -14,6 +14,37 @@ class PIDE_MCP_Sessions(
   val base_progress: Progress,
   val options: Options
 ) {
+  private val session_lifecycle: List[PIDE_MCP_Session_Lifecycle] =
+    tool_table.values.toList ::: Isabelle_System.make_services(classOf[PIDE_MCP_Session_Hooks])
+
+  private val dynamic_tools = Synchronized(Map.empty[PIDE_MCP_Session, List[PIDE_MCP_Tool]])
+  @volatile private var tools_changed: () => Unit = () => ()
+
+  def on_tools_changed(notify: () => Unit): Unit = { tools_changed = notify }
+
+  def available_tool_table: Map[String, PIDE_MCP_Tool] =
+    tool_table ++ dynamic_tools.value.valuesIterator.flatten.map(tool => tool.name -> tool).toMap
+
+  def publish_tools(session: PIDE_MCP_Session, tools: List[PIDE_MCP_Tool]): Unit = {
+    dynamic_tools.change { current =>
+      val occupied = tool_table.keySet ++ current.iterator.filterNot(_._1 eq session).
+        flatMap(_._2.map(_.name)).toSet
+      val names = tools.map(_.name)
+      val duplicates = names.groupBy(identity).collect { case (name, xs) if xs.size > 1 => name }
+      val conflicts = names.filter(occupied.contains) ::: duplicates.toList
+      if (conflicts.nonEmpty) error("Duplicate PIDE_MCP tool(s): " + commas_quote(conflicts.distinct))
+      current + (session -> tools)
+    }
+    tools_changed()
+  }
+
+  def withdraw_tools(session: PIDE_MCP_Session): Unit = {
+    val changed = dynamic_tools.change_result { current =>
+      (current.contains(session), current - session)
+    }
+    if (changed) tools_changed()
+  }
+
   private val build_lock = new Queue_Lock
   private def build_delay: Time = options.seconds("build_delay")
   private def build_progress_delay: Time = options.seconds("pide_mcp_session_progress_delay")
@@ -93,24 +124,25 @@ class PIDE_MCP_Sessions(
       if (phase == Phase.Running) session_future.peek.collect { case Exn.Res(session) => session }
       else None
 
-    private def run_tools_lifecycle(
+    private def run_session_lifecycle(
       operation: String,
-      run: PIDE_MCP_Tool => Unit
+      run: PIDE_MCP_Session_Lifecycle => Unit
     ): List[Throwable] = {
-      def failure_message(tool: PIDE_MCP_Tool, message: String): String =
-        s"Fatal error during $operation of tool ${quote(tool.name)} " +
+      def failure_message(tool: PIDE_MCP_Session_Lifecycle, message: String): String =
+        s"Fatal error during $operation of session hook ${quote(tool.name)} " +
         s"for session ${quote(id)}: $message"
-      PIDE_MCP_Util.capture_failures(tool_table.valuesIterator, run).map { case (tool, exn) =>
+      PIDE_MCP_Util.capture_failures(session_lifecycle.iterator, run).map { case (tool, exn) =>
         Exn.capture { log(failure_message(tool, Exn.print(exn))) }
         if (Exn.is_interrupt(exn)) exn else ERROR(failure_message(tool, Exn.message(exn)))
       }.toList
     }
 
     private def shutdown(session: PIDE_MCP_Session, progress: Progress): List[Throwable] = {
+      withdraw_tools(session)
       Exn.capture { log(s"Stopping PIDE session ${quote(id)}...") }
       for (consumer <- phase_consumer.change_result(consumer => (consumer, None)))
         session.session.phase_changed -= consumer
-      val hook_failures = run_tools_lifecycle("stop", _.stop(
+      val hook_failures = run_session_lifecycle("stop", _.stop(
         PIDE_MCP_Sessions.this, session, new Uncancellable_Progress(progress)))
       Exn.capture { Isabelle_Thread.try_uninterruptible { session.stop() } } match {
         case Exn.Res(process_result) =>
@@ -167,7 +199,7 @@ class PIDE_MCP_Sessions(
         start_progress.expose_interrupt()
         log(s"PIDE session ${quote(id)} started")
         PIDE_MCP_Util.check_failures(
-          run_tools_lifecycle("start", tool => {
+          run_session_lifecycle("start", tool => {
             start_progress.expose_interrupt()
             tool.start(PIDE_MCP_Sessions.this, session, start_progress)
           }))

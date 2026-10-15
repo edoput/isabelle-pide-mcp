@@ -39,6 +39,7 @@ class PIDE_MCP_Server(
   }
 
   private enum Event {
+    case Tools_Changed extends Event
     case Startup_Failure(exn: Throwable) extends Event
     case Input(line: String) extends Event
     case Input_Closed extends Event
@@ -76,6 +77,7 @@ class PIDE_MCP_Server(
   private class Run {
     val events = Mailbox[Event]()
     val out = new BufferedWriter(new OutputStreamWriter(System.out, UTF8.charset))
+    var initialized = false
     var tool_tasks = Map.empty[JSON_RPC.Id, Tool_Task]
     def progress_token_owner(token: Progress_Token): Option[JSON_RPC.Id] =
       tool_tasks.collectFirst {
@@ -103,6 +105,7 @@ class PIDE_MCP_Server(
 
   def run(startup: Progress => Unit): Unit = {
     val run_state = new Run
+    sessions.on_tools_changed(() => run_state.events.send(Event.Tools_Changed))
     Isabelle_Thread.fork(name = "pide_mcp_input", daemon = true) {
       read_input(run_state.events)
     }
@@ -123,6 +126,10 @@ class PIDE_MCP_Server(
           var running = true
           while (running) {
             for (event <- run_state.events.receive() if running) event match {
+              case Event.Tools_Changed =>
+                if (run_state.initialized)
+                  respond(run_state.out, JSON_Object("jsonrpc" -> Config.jsonrpc_version,
+                    "method" -> "notifications/tools/list_changed"))
               case Event.Startup_Failure(exn) =>
                 Exn.capture { log(s"Startup failure: ${Exn.print(exn)}") }
                 throw exn
@@ -183,6 +190,9 @@ class PIDE_MCP_Server(
       // messages without id are notifications, requiring a method but no response
       else if (!request.contains("id")) {
         method match {
+          case Some("notifications/initialized") =>
+            run.initialized = true
+            run.events.send(Event.Tools_Changed)
           case Some("notifications/cancelled") => handle_cancelled(request, run.tool_tasks)
           case Some(_) =>
           case None => respond(run.out, JSON_RPC.error(null,
@@ -242,14 +252,14 @@ class PIDE_MCP_Server(
         JSON_RPC.Error_Code.INVALID_PARAMS, Exn.message(exn)))
       case Exn.Res(client_version) => respond(out, JSON_RPC.result(id, JSON_Object(
         "protocolVersion" -> decide_protocol_version(client_version),
-        "capabilities" -> JSON_Object("tools" -> JSON_Object()),
+        "capabilities" -> JSON_Object("tools" -> JSON_Object("listChanged" -> true)),
         "serverInfo" -> JSON_Object("name" -> Config.name, "version" -> Config.version),
         "instructions" -> Config.instructions)))
     }
   }
 
   private def handle_tools_list(id: JSON_RPC.Id, out: BufferedWriter): Unit = {
-    val tools = sessions.tool_table.values.toList.sortBy(_.name).map { tool =>
+    val tools = sessions.available_tool_table.values.toList.sortBy(_.name).map { tool =>
       val entry = JSON_Object("name" -> tool.name, "description" -> tool.description,
         "inputSchema" -> tool.input_schema)
       tool.annotations match {
@@ -274,7 +284,7 @@ class PIDE_MCP_Server(
             JSON_RPC.Error_Code.INVALID_PARAMS,
             s"Progress token ${JSON.Format(token)} is already used " +
             s"for request ${JSON.Format(owner)}"))
-          case None => sessions.tool_table.get(call.name) match {
+          case None => sessions.available_tool_table.get(call.name) match {
             case None => respond(run.out, JSON_RPC.error(id,
               JSON_RPC.Error_Code.INVALID_PARAMS, s"Tool not found: ${quote(call.name)}"))
             case Some(tool) =>

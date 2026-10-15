@@ -13,7 +13,19 @@ object PIDE_MCP_Tool {
       name.forall(c => Symbol.is_ascii_letter(c) || Symbol.is_ascii_digit(c) || "_-.".contains(c))
 }
 
-abstract class PIDE_MCP_Tool(val name: String) {
+trait PIDE_MCP_Session_Lifecycle {
+  def name: String
+  def start(sessions: PIDE_MCP_Sessions, session: PIDE_MCP_Session, progress: Progress): Unit
+  def stop(sessions: PIDE_MCP_Sessions, session: PIDE_MCP_Session, progress: Progress): Unit
+}
+
+abstract class PIDE_MCP_Session_Hooks
+extends Isabelle_System.Service with PIDE_MCP_Session_Lifecycle {
+  def start(sessions: PIDE_MCP_Sessions, session: PIDE_MCP_Session, progress: Progress): Unit = ()
+  def stop(sessions: PIDE_MCP_Sessions, session: PIDE_MCP_Session, progress: Progress): Unit = ()
+}
+
+abstract class PIDE_MCP_Tool(val name: String) extends PIDE_MCP_Session_Lifecycle {
   if (!PIDE_MCP_Tool.valid_name(name)) error(s"Bad PIDE_MCP tool name: ${quote(name)}")
 
   def description: String

@@ -1,0 +1,3 @@
+# -*- shell-script -*-
+PIDE_MCP_LIBRARY_DEMO_HOME="$COMPONENT"
+PIDE_MCP_LIBRARY_DEMO_JAR="$COMPONENT/lib/pide_mcp_library_demo.jar"
